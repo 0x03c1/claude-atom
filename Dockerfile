@@ -1,4 +1,4 @@
-# Servidor claude-xiaozhi em container (Render; ver render.yaml na raiz do repositorio).
+# Servidor claude-xiaozhi em container (Render; ver render.yaml). Contexto: raiz do repositorio.
 # Precisa de ANTHROPIC_API_KEY, CLAUDE_ATOM_SECRET e ALLOWED_DEVICES no ambiente.
 FROM python:3.12-slim
 
@@ -7,9 +7,9 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY requirements.txt .
+COPY server/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY claude_xiaozhi.py .
+COPY server/claude_xiaozhi.py .
 
 # Whisper e a voz Piper vao dentro da imagem: o servidor sobe em segundos e nao precisa de disco
 ARG WHISPER_MODEL=small

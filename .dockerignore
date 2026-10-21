@@ -1,0 +1,7 @@
+# O container so precisa de server/ (o resto do repositorio e firmware e outras tentativas)
+.git
+xiaozhi-claude
+firmware
+host
+backup
+**/__pycache__

@@ -4,11 +4,13 @@ services:
   - type: web
     name: claude-atom
     runtime: docker
-    dockerfilePath: ./server/Dockerfile
-    dockerContext: ./server
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
     buildFilter:
       paths:
         - server/**
+        - Dockerfile
+        - render.yaml
     plan: 1c-2g          # 1 CPU / 2 GB: o Whisper small ocupa ~420 MB parado e mais ao transcrever
     region: virginia     # a mais perto do Brasil (nao ha regiao na America do Sul)
     healthCheckPath: /   # 503 ate os modelos carregarem

@@ -73,4 +73,4 @@ uvx --from esptool esptool --port /dev/cu.usbmodem12301 write-flash 0 backup/ato
 
 - `firmware/` + `host/`: firmware Arduino próprio (painel do Claude Code via USB e assistente com APIs na nuvem).
   Os hooks do painel estão desativados em `.claude/settings.painel-usb.json.disabled`.
-- `server/Dockerfile`: o mesmo servidor em container, se um dia precisar rodar fora do Mac (ex.: Render).
+- `Dockerfile` + `render.yaml`: o mesmo servidor em container, se um dia precisar rodar fora do Mac (ex.: Render).
