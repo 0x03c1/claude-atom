@@ -18,3 +18,7 @@ __pycache__/
 
 # Indice do editor (clangd)
 firmware/.cache/
+
+# Configuracoes locais do editor e do Claude Code (tem caminhos da maquina)
+.vscode/
+.claude/

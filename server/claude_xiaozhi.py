@@ -115,6 +115,8 @@ class Config:
     idle_close_s: int = 30
     session_ttl_s: int = 15 * 60
     secret: str = ""
+    insecure: bool = False  # sem segredo: so para a rede local
+    log_text: bool = False  # escrever no log o que foi dito (privacidade)
     allowed: frozenset = frozenset()
 
     @property
@@ -150,6 +152,15 @@ class Transcriber:
             initial_prompt="Conversa com o Claude.",  # sem a dica, "Claude" vira "Club", "cloud"
         )
         return " ".join(s.text.strip() for s in segments).strip()
+
+
+def clean(value: str) -> str:
+    """Cabecalho vindo de fora, pronto para log e para chave de dicionario."""
+    return re.sub(r"[^0-9A-Za-z:._-]", "?", value)[:40]
+
+
+def said(cfg: "Config", text: str) -> str:
+    return text if cfg.log_text else f"({len(text)} caracteres)"
 
 
 def cpu_limit() -> int:
@@ -316,7 +327,7 @@ class Agent:
 
 
 class ClaudeCodeAgent(Agent):
-    async def stream(self, device: str, text: str):
+    async def stream(self, device: str, text: str, device_tools=None):
         claude = shutil.which("claude") or str(Path.home() / ".local/bin/claude")
         args = [claude, "-p", text, "--output-format", "stream-json", "--include-partial-messages",
                 "--verbose", "--append-system-prompt", VOICE_PROMPT, "--allowedTools", self.cfg.tools]
@@ -340,6 +351,71 @@ class ClaudeCodeAgent(Agent):
 
 
 API_MODELS = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5", "haiku": "claude-haiku-5-5"}
+
+# Ferramentas do aparelho que o Claude pode usar. Lista fechada de proposito: o firmware tambem oferece
+# coisas como gravar firmware de uma URL, e um texto da busca na web nao pode chegar ate elas.
+DEVICE_TOOLS = ("self.get_device_status", "self.audio_speaker.set_volume", "self.screen.set_brightness",
+                "self.screen.set_theme")
+
+
+class DeviceTools:
+    """Ferramentas MCP do proprio aparelho (estado, volume, tela), pelo canal "mcp" do protocolo xiaozhi."""
+
+    def __init__(self, send):
+        self.send = send  # coroutine que recebe o payload JSON-RPC
+        self.tools: list[dict] = []  # no formato da API
+        self.names: dict[str, str] = {}  # nome na API -> nome no aparelho
+        self.pending: dict[int, asyncio.Future] = {}
+        self.last_id = 0
+
+    async def request(self, method: str, params: dict, timeout: float = 5.0) -> dict:
+        self.last_id += 1
+        rid = self.last_id
+        self.pending[rid] = asyncio.get_running_loop().create_future()
+        try:
+            await self.send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params})
+            return await asyncio.wait_for(self.pending[rid], timeout)
+        finally:
+            self.pending.pop(rid, None)
+
+    def on_message(self, payload: dict):
+        fut = self.pending.get(payload.get("id"))
+        if fut and not fut.done():
+            fut.set_result(payload)
+
+    async def discover(self):
+        await self.request("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
+                                          "clientInfo": {"name": "claude-atom", "version": "1"}})
+        cursor = ""
+        for _ in range(5):  # paginas de tools/list
+            result = (await self.request("tools/list", {"cursor": cursor})).get("result") or {}
+            for tool in result.get("tools", []):
+                name = tool.get("name", "")
+                if name not in DEVICE_TOOLS:
+                    continue
+                api_name = re.sub(r"[^a-zA-Z0-9_-]", "_", name)  # a API nao aceita "." no nome
+                self.names[api_name] = name
+                self.tools.append({"name": api_name, "description": tool.get("description", "")[:1000],
+                                   "input_schema": tool.get("inputSchema") or {"type": "object", "properties": {}},
+                                   "eager_input_streaming": True})
+            cursor = result.get("nextCursor") or ""
+            if not cursor:
+                break
+
+    async def call(self, api_name: str, arguments) -> tuple[str, bool]:
+        """Devolve (texto, erro?). O firmware confere os tipos e limites dos argumentos."""
+        name = self.names.get(api_name)
+        if not name or not isinstance(arguments, dict):
+            return "ferramenta ou argumentos invalidos", True
+        try:
+            reply = await self.request("tools/call", {"name": name, "arguments": arguments})
+        except asyncio.TimeoutError:
+            return "o aparelho nao respondeu", True
+        if "error" in reply:
+            return str((reply["error"] or {}).get("message", "erro")), True
+        result = reply.get("result") or {}
+        text = " ".join(c.get("text", "") for c in result.get("content", []) if isinstance(c, dict))
+        return text or "ok", bool(result.get("isError"))
 
 
 def echoable(content: list) -> list:
@@ -381,31 +457,53 @@ class ApiAgent(Agent):
         super().forget(device)
         self.histories.pop(device, None)
 
-    async def stream(self, device: str, text: str):
+    async def stream(self, device: str, text: str, device_tools: DeviceTools | None = None):
         history = self.histories.get(device, []) if self.session_for(device) else []
         if len(history) >= 2 * self.MAX_TURNS:
             history = []
         # a data vai na pergunta, nao no prompt de sistema, para nao quebrar o cache
         messages = history + [{"role": "user", "content": f"[{time.strftime('%d/%m/%Y %H:%M')}] {text}"}]
+        tools = self.tools + (device_tools.tools if device_tools else [])
+        searching = False
         try:
-            for _ in range(4):  # pause_turn: a busca na web pode pedir para continuar
+            # varias voltas: pause_turn da busca na web e chamadas das ferramentas do aparelho
+            for _ in range(8):
                 async with self.client.beta.messages.stream(
-                    model=self.model, max_tokens=8000, system=VOICE_PROMPT, messages=messages, tools=self.tools,
+                    model=self.model, max_tokens=8000, system=VOICE_PROMPT, messages=messages, tools=tools,
                     output_config={"effort": self.cfg.effort}, cache_control={"type": "ephemeral"}, **self.extra,
                 ) as stream:
                     async for event in stream:
                         if event.type == "text":
                             yield event.text
-                        elif event.type == "content_block_start" and event.content_block.type == "server_tool_use":
-                            yield "\n"  # fecha a frase antes da busca
+                        elif (event.type == "content_block_start" and event.content_block.type == "server_tool_use"
+                              and not searching):
+                            searching = True  # avisa uma vez, para nao ficar em silencio durante a busca
+                            yield "\nSo um instante, vou pesquisar.\n"
                     final = await stream.get_final_message()
                 if final.stop_reason == "refusal":
-                    log.warning("API recusou (%s): %s", final.stop_details, text)
+                    log.warning("API recusou (%s): %s", final.stop_details, said(self.cfg, text))
                     yield "\nDesculpe, nao posso ajudar com isso."
                     return  # a pergunta recusada nao entra no historico
+                if final.stop_reason == "max_tokens":
+                    log.warning("resposta cortada em max_tokens")
+                    return  # uma chamada de ferramenta pela metade quebraria o historico
                 messages.append({"role": "assistant", "content": echoable(final.content)})
-                if final.stop_reason != "pause_turn":
+                if final.stop_reason == "pause_turn":
+                    continue
+                uses = [b for b in final.content if b.type == "tool_use"]
+                if final.stop_reason != "tool_use" or not uses or not device_tools:
                     break
+                results = []
+                for use in uses:
+                    output, is_error = await device_tools.call(use.name, use.input)
+                    log.info("[%s] ferramenta %s %s -> %s", device, use.name, use.input, output[:200])
+                    results.append({"type": "tool_result", "tool_use_id": use.id, "content": output,
+                                    "is_error": is_error})
+                messages.append({"role": "user", "content": results})
+        except ValueError:  # argumentos de ferramenta em JSON invalido (streaming antecipado)
+            log.warning("argumentos invalidos numa chamada de ferramenta")
+            yield "\nDesculpe, me enrolei com o aparelho. Pode repetir?"
+            return
         except self.anthropic.AuthenticationError:
             log.error("ANTHROPIC_API_KEY ausente ou invalida")
             yield "\nA chave da API da Anthropic nao esta configurada."
@@ -425,7 +523,7 @@ class ApiAgent(Agent):
 
 
 class OpenCodeAgent(Agent):
-    async def stream(self, device: str, text: str):
+    async def stream(self, device: str, text: str, device_tools=None):
         opencode = shutil.which("opencode") or str(Path.home() / ".opencode/bin/opencode")
         sid = self.session_for(device)
         message = text if sid else f"[Instrucoes de estilo: {VOICE_PROMPT}]\n\n{text}"
@@ -463,6 +561,7 @@ class Session:
     in_speech: bool = False
     last_activity: float = field(default_factory=time.time)
     task: asyncio.Task | None = None
+    tools: DeviceTools | None = None
 
     async def send(self, **msg):
         msg.setdefault("session_id", self.session_id)
@@ -476,6 +575,9 @@ class Session:
         if t == "hello":
             await self.send(type="hello", transport="websocket", audio_params={
                 "format": "opus", "sample_rate": OUT_RATE, "channels": 1, "frame_duration": FRAME_MS})
+            if (msg.get("features") or {}).get("mcp") and not self.tools:
+                self.tools = DeviceTools(lambda payload: self.send(type="mcp", payload=payload))
+                asyncio.create_task(self.discover_tools())
         elif t == "listen":
             state = msg.get("state")
             if state == "start":
@@ -491,7 +593,16 @@ class Session:
             log.info("[%s] interrompido pelo aparelho", self.device)
             await self.cancel()
             await self.send(type="tts", state="stop")
-        # "mcp" e outros: ignorados
+        elif t == "mcp" and self.tools and isinstance(msg.get("payload"), dict):
+            self.tools.on_message(msg["payload"])
+        # outros tipos: ignorados
+
+    async def discover_tools(self):
+        try:
+            await self.tools.discover()
+            log.info("[%s] ferramentas do aparelho: %s", self.device, ", ".join(self.tools.names.values()) or "nenhuma")
+        except Exception as e:  # sem ferramentas a conversa continua normal
+            log.warning("[%s] nao consegui listar as ferramentas do aparelho: %r", self.device, e)
 
     def busy(self) -> bool:
         return bool(self.task and not self.task.done())
@@ -505,7 +616,11 @@ class Session:
     def on_audio(self, packet: bytes):
         if not self.listening or self.busy():  # enquanto responde, o microfone e ignorado
             return
-        pcm = np.frombuffer(self.decoder.decode(packet, IN_RATE * FRAME_MS // 1000), dtype=np.int16)
+        try:
+            pcm = np.frombuffer(self.decoder.decode(packet, IN_RATE * FRAME_MS // 1000), dtype=np.int16)
+        except opuslib.OpusError:  # pacote corrompido: descarta e segue a conversa
+            log.debug("[%s] pacote Opus invalido (%d bytes)", self.device, len(packet))
+            return
         self.pending = np.concatenate([self.pending, pcm])
         while len(self.pending) >= VAD_FRAME:
             frame, self.pending = self.pending[:VAD_FRAME], self.pending[VAD_FRAME:]
@@ -514,7 +629,7 @@ class Session:
                 self.speech.append(frame)
                 self.silence_ms = 0 if voiced else self.silence_ms + 30
                 long_enough = len(self.speech) * 30 > 30000
-                if self.mode == "auto" and (self.silence_ms >= self.server.cfg.silence_ms or long_enough):
+                if long_enough or (self.mode == "auto" and self.silence_ms >= self.server.cfg.silence_ms):
                     self.listening = False
                     self.respond(self.take_utterance())
                     return
@@ -551,7 +666,7 @@ class Session:
             await srv.ready.wait()
             t0 = time.time()
             text = await asyncio.to_thread(srv.asr.transcribe, audio)
-            log.info("[%s] voce (%.1fs): %s", self.device, time.time() - t0, text)
+            log.info("[%s] voce (%.1fs): %s", self.device, time.time() - t0, said(self.server.cfg, text))
             if len(text) < 2:
                 return self.start_listening()
             await self.send(type="stt", text=text)
@@ -559,7 +674,8 @@ class Session:
             if re.search(r"\b(nova conversa|esquece tudo|reinicia a conversa)\b", text, re.I):
                 srv.agent.forget(self.device)
                 return await self.speak_all(["Certo, começando uma conversa nova."])
-            await self.speak_stream(srv.agent.stream(self.device, text))
+            tools = self.tools if self.tools and self.tools.tools else None
+            await self.speak_stream(srv.agent.stream(self.device, text, tools))
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -604,7 +720,7 @@ class Session:
                     await self.send(type="llm", emotion="neutral", text="🙂")
                     started = True
                     play_start = time.monotonic()
-                log.info("[%s] claude: %s", self.device, sentence)
+                log.info("[%s] claude: %s", self.device, said(self.server.cfg, sentence))
                 await self.send(type="tts", state="sentence_start", text=sentence)
                 pad = (-len(pcm)) % frame
                 pcm = np.concatenate([pcm, np.zeros(pad + frame, np.int16)])  # + 60 ms de respiro
@@ -640,16 +756,27 @@ class Server:
         self.voice = Voice(cfg)
         self.agent: Agent = {"api": ApiAgent, "claude": ClaudeCodeAgent, "opencode": OpenCodeAgent}[cfg.agent](cfg)
         self.ready = asyncio.Event()
+        self.sessions: dict[str, Session] = {}
+        self.last_warning = 0.0
+
+    MAX_SESSIONS = 4
+
+    def warn(self, msg: str, *args):
+        """Avisos de acesso negado, no maximo um a cada 10 s (nao deixa ninguem inundar o log)."""
+        if time.time() - self.last_warning > 10:
+            self.last_warning = time.time()
+            log.warning(msg, *args)
 
     def device_allowed(self, request: web.Request) -> bool:
-        device = request.headers.get("Device-Id", "").lower()
+        device = clean(request.headers.get("Device-Id", "")).lower()
         if self.cfg.allowed and device not in self.cfg.allowed:
-            log.warning("aparelho nao autorizado: %s (%s)", device or "?", request.remote)
+            self.warn("aparelho nao autorizado: %s (%s)", device or "?", request.remote)
             return False
         return True
 
     async def ota(self, request: web.Request):
-        if request.match_info.get("secret", "") != self.cfg.secret or not self.device_allowed(request):
+        if not hmac.compare_digest(request.match_info.get("secret", ""), self.cfg.secret) \
+                or not self.device_allowed(request):
             raise web.HTTPNotFound()
         try:
             body = await request.json() if request.can_read_body else {}
@@ -661,7 +788,7 @@ class Server:
         else:
             scheme = "wss" if request.headers.get("X-Forwarded-Proto", request.scheme) == "https" else "ws"
             ws_url = f"{scheme}://{request.host}/xiaozhi/v1/"
-        log.info("OTA de %s (%s) -> %s", request.headers.get("Device-Id", "?"), version, ws_url)
+        log.info("OTA de %s (%s) -> %s", clean(request.headers.get("Device-Id", "?")), clean(str(version)), ws_url)
         return web.json_response({
             "server_time": {"timestamp": int(time.time() * 1000),
                             "timezone_offset": time.localtime().tm_gmtoff // 60},
@@ -671,27 +798,41 @@ class Server:
 
     async def websocket(self, request: web.Request):
         auth = request.headers.get("Authorization", "")
-        if not hmac.compare_digest(auth, f"Bearer {self.cfg.token}" if self.cfg.token else auth):
-            log.warning("token invalido de %s", request.remote)
+        expected = f"Bearer {self.cfg.token}" if self.cfg.token else (auth if self.cfg.insecure else "\0")
+        if not hmac.compare_digest(auth.encode(), expected.encode()):  # bytes: aceita qualquer cabecalho
+            self.warn("token invalido de %s", request.remote)
             raise web.HTTPUnauthorized()
         if not self.device_allowed(request):
             raise web.HTTPForbidden()
+        device = clean(request.headers.get("Device-Id", "") or request.remote or "?")
+        if old := self.sessions.get(device):  # o aparelho reconectou: so vale a conexao nova
+            await old.ws.close()
+        if len(self.sessions) >= self.MAX_SESSIONS:
+            raise web.HTTPServiceUnavailable()
         ws = web.WebSocketResponse(heartbeat=30, max_msg_size=1 << 20)
         await ws.prepare(request)
-        device = request.headers.get("Device-Id", request.remote or "?")
         s = Session(ws=ws, device=device, server=self)
+        self.sessions[device] = s
         log.info("[%s] conectado", device)
         watchdog = asyncio.create_task(self.close_when_idle(s))
         try:
             async for msg in ws:
                 if msg.type == WSMsgType.TEXT:
                     try:
-                        await s.on_json(json.loads(msg.data))
+                        data = json.loads(msg.data)
                     except ValueError:
-                        pass
+                        continue
+                    if not isinstance(data, dict):
+                        continue
+                    try:
+                        await s.on_json(data)
+                    except Exception:  # uma mensagem estranha nao derruba a conversa
+                        log.exception("[%s] erro tratando %s", device, data.get("type"))
                 elif msg.type == WSMsgType.BINARY:
                     s.on_audio(msg.data)
         finally:
+            if self.sessions.get(device) is s:
+                del self.sessions[device]
             watchdog.cancel()
             await s.cancel()
             log.info("[%s] desconectado", device)
@@ -760,8 +901,14 @@ def main():
     p.add_argument("--language", default=env("LANGUAGE", "pt"), help="idioma da fala; 'auto' para detectar")
     p.add_argument("--secret", default=env("CLAUDE_ATOM_SECRET", ""), help="segredo do caminho de OTA")
     p.add_argument("--allowed", default=env("ALLOWED_DEVICES", ""), help="MACs autorizados, separados por virgula")
+    p.add_argument("--insecure", action="store_true", default=env("INSECURE") == "1",
+                   help="aceita rodar sem segredo (OTA aberto em /xiaozhi/ota/): so na rede local")
+    p.add_argument("--log-text", action="store_true", default=env("LOG_TEXT") == "1",
+                   help="escreve no log o que voce e o Claude disseram (padrao: so o tamanho)")
     p.add_argument("-v", "--verbose", action="store_true")
     a = p.parse_args()
+    if not a.secret and not a.insecure:
+        p.error("defina CLAUDE_ATOM_SECRET (ou --secret). Para rodar aberto na rede local, use --insecure")
 
     logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO, stream=sys.stdout,
                         format="%(asctime)s %(levelname).1s %(message)s", datefmt="%H:%M:%S")
@@ -773,6 +920,7 @@ def main():
                  public_url=a.public_url, tools=a.tools,
                  tts=a.tts, voice=voice, rate=a.rate, whisper=a.whisper,
                  language=None if a.language == "auto" else a.language, secret=a.secret,
+                 insecure=a.insecure, log_text=a.log_text,
                  allowed=frozenset(m.strip().lower() for m in a.allowed.split(",") if m.strip()))
     Server(cfg).run()
 

@@ -1,76 +1,93 @@
 # Claude Atom
 
-M5Stack AtomS3 + Atomic Echo Base conversando por voz com o **Claude**, pela API da Anthropic.
+M5Stack **AtomS3 + Atomic Echo Base** conversando por voz com o **Claude**, pela API da Anthropic.
 
-O aparelho roda o firmware **xiaozhi 1.9.4** (palavra de ativação "Hi, M Five", áudio Opus, tela) apontando
-para um servidor no próprio Mac em vez da nuvem da Tenclass (api.tenclass.net):
+O aparelho roda o firmware [xiaozhi](https://github.com/78/xiaozhi-esp32) (palavra de ativação "Hi, M Five",
+áudio Opus, tela) com uma interface do Claude e aponta para um servidor próprio em vez da nuvem do xiaozhi:
 
 ```
-AtomS3 ── "Hi, M Five" / botão ── Opus 16 kHz ──► Tailscale Funnel (HTTPS público) ──► Mac: server/claude_xiaozhi.py
-                                                     ├─ VAD (webrtcvad) + Whisper local (faster-whisper)
-                                                     ├─ API da Anthropic em streaming (Claude Opus 5.5 + busca na web)
+AtomS3 ── "Hi, M Five" / botão ── Opus 16 kHz ──► server/claude_xiaozhi.py (Render, ou o seu computador)
+                                                     ├─ VAD (webrtcvad) + Whisper (faster-whisper, na CPU)
+                                                     ├─ API da Anthropic em streaming (Claude + busca na web
+                                                     │  + ferramentas do aparelho: volume, tela, estado)
                                                      └─ voz Piper pt-BR ─► Opus 24 kHz ─► alto-falante
 ```
 
-A API da Anthropic só troca texto, por isso transcrição e voz rodam no Mac. Nada de VPS: o Funnel do
-Tailscale dá ao Mac um endereço HTTPS fixo (`https://<mac>.<tailnet>.ts.net`), e o aparelho funciona em
-qualquer Wi-Fi enquanto o Mac estiver ligado e acordado.
-
-## Instalar no Mac
-
-1. Guarde a chave da API no Keychain (ela não fica em arquivo nenhum):
-   ```sh
-   security add-generic-password -U -s claude-atom -a anthropic -w
-   ```
-2. Deixe o servidor sempre ligado e publicado pelo Funnel:
-   ```sh
-   server/install-mac.sh            # LaunchAgent + Funnel; na 1ª vez o Tailscale pode pedir para liberar o Funnel
-   tail -f ~/.claude-atom/server.log
-   server/install-mac.sh --remove   # desfaz tudo
-   ```
-3. Compile e grave o firmware com a URL do Funnel (ver **Firmware**).
-
-O acesso é protegido pelo segredo da URL de OTA, pelo token do WebSocket e pela lista de MACs, todos em
-`~/.claude-atom/cloud.json` (fora do repositório).
+A API da Anthropic só troca texto, por isso a transcrição e a voz rodam no servidor.
 
 ## Usar
 
 Diga **"Hi, M Five"** ou clique no botão e fale. A conversa continua sozinha; depois de 30 s de silêncio o
-aparelho volta a esperar a palavra de ativação. Clique durante a fala para interromper. Diga "nova conversa"
-para zerar o contexto (ele também zera após 15 min sem uso).
+aparelho volta a esperar a palavra de ativação. **Clique durante a fala para interromper.** Diga "nova conversa"
+para zerar o contexto (ele também zera após 15 min sem uso). Dá para pedir "abaixa o volume" ou "deixa a tela
+mais clara".
 
-Opções (em `server/run-mac.sh ...` ou direto no `claude_xiaozhi.py`):
+## Servidor no Render
 
-- `--model opus|sonnet|haiku` (padrão `opus` = `claude-opus-5-5`); `--effort low|medium|high` (padrão `low`, mais rápido)
-- `--agent claude`: usa o Claude Code logado (`claude -p`), sem chave de API e com leitura de arquivos;
-  `--agent opencode` para o OpenCode
-- `--voice`, `--rate`, `--whisper small|base|medium`, `--tts say`
+1. Faça um fork deste repositório e, no [Render](https://dashboard.render.com), crie um **Blueprint** apontando
+   para ele (ele lê o `render.yaml`) ou um **Web Service** com runtime Docker e o `Dockerfile` da raiz.
+2. Use uma instância de **2 GB** (`1c-2g`): o Whisper `small` ocupa ~420 MB parado e mais ao transcrever; com
+   512 MB o serviço cai por falta de memória. O plano grátis dorme após 15 min e o aparelho dá erro ao ligar.
+3. Variáveis de ambiente:
+
+   | Variável | Valor |
+   |---|---|
+   | `ANTHROPIC_API_KEY` | a sua chave da API |
+   | `CLAUDE_ATOM_SECRET` | um segredo seu, por exemplo `python3 -c "import secrets;print(secrets.token_hex(16))"` |
+   | `ALLOWED_DEVICES` | o MAC do aparelho (aparece no log serial: `wifi:mode : sta (xx:xx:...)`) |
+   | `AGENT_MODEL` | `opus` (padrão), `sonnet` ou `haiku` (mais rápido e barato) |
+   | `AGENT_EFFORT` | `low` (padrão), `medium` ou `high` |
+   | `WHISPER_MODEL` | `small` (padrão, mais preciso) ou `base` (~3x mais rápido) |
+   | `LOG_TEXT` | `1` para escrever no log o que foi dito (padrão: só o tamanho) |
+
+Cada push na `main` que mexa no servidor gera um deploy novo sem derrubar o que está no ar.
 
 ## Firmware
 
-`xiaozhi-claude/` é o xiaozhi v1.9.4 com a interface do Claude (`main/boards/atoms3-echo-base/claude_display.*`),
-strings pt-BR, só a palavra "Hi, M Five" e o ponto de acesso "Claude-XXXX". Base: tag `v1.9.4` de
-[78/xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) (commit `3ced770`); as mudanças estão em
-`main/boards/atoms3-echo-base/`, `main/boards/common/wifi_board.cc`, `main/idf_component.yml` e
-`main/assets/locales/pt-PT/language.json`. A URL de OTA vem de `public_url`
-e `secret` em `~/.claude-atom/cloud.json`:
+`xiaozhi-claude/` é o xiaozhi **v1.9.4** ([78/xiaozhi-esp32](https://github.com/78/xiaozhi-esp32), commit
+`3ced770`, licença MIT) com a interface do Claude (`main/boards/atoms3-echo-base/claude_display.*`), strings pt-BR,
+só a palavra "Hi, M Five" e o ponto de acesso "Claude-XXXX". As mudanças estão em `main/boards/atoms3-echo-base/`,
+`main/boards/common/wifi_board.cc`, `main/idf_component.yml` e `main/assets/locales/pt-PT/language.json`.
+
+A URL do servidor fica gravada no firmware. Crie `~/.claude-atom/cloud.json` (fora do repositório) e compile:
 
 ```sh
-xiaozhi-claude/build-claude.sh
-cd xiaozhi-claude && source env.sh && idf.py -p /dev/cu.usbmodem12301 flash   # preserva o Wi-Fi salvo
+cat > ~/.claude-atom/cloud.json <<'EOF'
+{"public_url": "https://SEU-SERVICO.onrender.com", "secret": "O MESMO CLAUDE_ATOM_SECRET", "device": "xx:xx:xx:xx:xx:xx"}
+EOF
+xiaozhi-claude/build-claude.sh                      # precisa do ESP-IDF 5.x (ajuste xiaozhi-claude/env.sh)
+cd xiaozhi-claude && source env.sh && idf.py -p /dev/cu.usbmodem* flash   # preserva o Wi-Fi salvo
 ```
 
-Backups da flash em `backup/` (contêm a senha do Wi-Fi; fora do git):
+Na primeira vez o aparelho abre o ponto de acesso "Claude-XXXX" para você escolher o Wi-Fi.
+
+## Segurança
+
+- O servidor só atende quem conhece o segredo: a URL de OTA (`/xiaozhi/ota/<segredo>/`) responde 404 para o resto
+  e entrega o token do WebSocket, que é derivado do segredo. Sem segredo o servidor nem sobe (a não ser com
+  `--insecure`, só para a rede local).
+- `ALLOWED_DEVICES` é uma camada extra; o MAC não é secreto. Quem tiver o segredo pode usar o seu crédito da API,
+  então trate-o como senha. O segredo fica no firmware gravado, no `~/.claude-atom/cloud.json` e no Render.
+- O Claude só alcança uma lista fechada de ferramentas do aparelho (estado, volume, tela); as demais, como gravar
+  firmware, ficam de fora.
+- O histórico da conversa fica só na memória do servidor. Os logs não guardam o texto, a menos que `LOG_TEXT=1`.
+
+## Rodar no seu computador
 
 ```sh
-# xiaozhi original com OTA para http://192.168.0.3:8003/xiaozhi/ota/ (servidor sem --secret, só na rede local)
-uvx --from esptool esptool --port /dev/cu.usbmodem12301 write-flash 0 backup/xiaozhi-claude-8MB.bin
-# voltar ao original (nuvem Tenclass)
-uvx --from esptool esptool --port /dev/cu.usbmodem12301 write-flash 0 backup/atoms3-original-8MB.bin
+uv run --script server/claude_xiaozhi.py --secret "$CLAUDE_ATOM_SECRET" --allowed xx:xx:xx:xx:xx:xx
 ```
+
+Opções: `--model`, `--effort`, `--whisper`, `--voice`, `--rate`, `--tts say` (voz do macOS),
+`--agent claude` (Claude Code logado, sem chave de API) ou `--agent opencode`. No Mac, `server/install-mac.sh`
+deixa o servidor sempre ligado e o publica pelo Tailscale Funnel (`server/run-mac.sh` lê a chave do Keychain).
 
 ## Outras tentativas neste repositório
 
-- `firmware/` + `host/`: firmware Arduino próprio (painel do Claude Code via USB e assistente com APIs na nuvem).
-  Os hooks do painel estão desativados em `.claude/settings.painel-usb.json.disabled`.
-- `Dockerfile` + `render.yaml`: o mesmo servidor em container, se um dia precisar rodar fora do Mac (ex.: Render).
+- `firmware/` + `host/`: um firmware Arduino anterior (painel do Claude Code via USB). **Descontinuado**: a interface
+  web dele na rede local não tem autenticação; não use.
+
+## Contribuir
+
+Issues e pull requests são bem-vindos. Ideias em aberto: interromper o Claude falando "Hi, M Five" durante a
+resposta, suporte ao AtomS3R (com PSRAM: redução de ruído e cancelamento de eco) e transcrição mais rápida.
