@@ -19,6 +19,8 @@ ENV DATA_DIR=/app/data \
     PYTHONUNBUFFERED=1
 RUN python -c "from pathlib import Path; import claude_xiaozhi as c; \
 c.Voice(c.Config(data_dir=Path('/app/data'))).load(); c.Transcriber('$WHISPER_MODEL', 'pt').load()"
+# o modelo ja esta na imagem: nao consultar o Hugging Face ao subir
+ENV HF_HUB_OFFLINE=1
 
 EXPOSE 8003
 CMD ["python", "claude_xiaozhi.py", "--agent", "api", "--tts", "piper"]
