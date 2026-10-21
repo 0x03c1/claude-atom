@@ -145,7 +145,8 @@ class Transcriber:
     def transcribe(self, pcm: np.ndarray) -> str:
         audio = pcm.astype(np.float32) / 32768.0
         segments, _ = self.model.transcribe(
-            audio, language=self.language, beam_size=1, vad_filter=False, condition_on_previous_text=False
+            audio, language=self.language, beam_size=1, vad_filter=False, condition_on_previous_text=False,
+            initial_prompt="Conversa com o Claude.",  # sem a dica, "Claude" vira "Club", "cloud"
         )
         return " ".join(s.text.strip() for s in segments).strip()
 
