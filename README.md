@@ -1,12 +1,12 @@
 # Claude Atom
 
-M5Stack **AtomS3 + Atomic Echo Base** conversando por voz com o **Claude**, pela API da Anthropic.
+**Jarvis**: um M5Stack **AtomS3 + Atomic Echo Base** conversando por voz com o **Claude**, pela API da Anthropic.
 
-O aparelho roda o firmware [xiaozhi](https://github.com/78/xiaozhi-esp32) (palavra de ativação "Hi, M Five",
+O aparelho roda o firmware [xiaozhi](https://github.com/78/xiaozhi-esp32) (palavra de ativação "Jarvis",
 áudio Opus, tela) com uma interface do Claude e aponta para um servidor próprio em vez da nuvem do xiaozhi:
 
 ```
-AtomS3 ── "Hi, M Five" / botão ── Opus 16 kHz ──► server/claude_xiaozhi.py (Render, ou o seu computador)
+AtomS3 ── "Jarvis" / botão ────── Opus 16 kHz ──► server/claude_xiaozhi.py (Render, ou o seu computador)
                                                      ├─ VAD (webrtcvad) + Whisper (faster-whisper, na CPU)
                                                      ├─ API da Anthropic em streaming (Claude + busca na web
                                                      │  + ferramentas do aparelho: volume, tela, estado)
@@ -17,7 +17,7 @@ A API da Anthropic só troca texto, por isso a transcrição e a voz rodam no se
 
 ## Usar
 
-Diga **"Hi, M Five"** ou clique no botão e fale. A conversa continua sozinha; depois de 30 s de silêncio o
+Diga **"Oi, Jarvis"** (o aparelho reconhece a palavra "Jarvis", em inglês) ou clique no botão e fale. A conversa continua sozinha; depois de 30 s de silêncio o
 aparelho volta a esperar a palavra de ativação. **Clique durante a fala para interromper.** Diga "nova conversa"
 para zerar o contexto (ele também zera após 15 min sem uso). Dá para pedir "abaixa o volume" ou "deixa a tela
 mais clara".
@@ -38,6 +38,8 @@ mais clara".
    | `AGENT_MODEL` | `opus` (padrão), `sonnet` ou `haiku` (mais rápido e barato) |
    | `AGENT_EFFORT` | `low` (padrão), `medium` ou `high` |
    | `WHISPER_MODEL` | `small` (padrão, mais preciso) ou `base` (~3x mais rápido) |
+   | `ASSISTANT_NAME` | nome do assistente (padrão `Jarvis`; a palavra de ativação é fixa no firmware) |
+   | `USER_TITLE` | como ele chama você (padrão `senhor`; vazio para nenhum) |
    | `LOG_TEXT` | `1` para escrever no log o que foi dito (padrão: só o tamanho) |
    | `BUDGET_USD` | aviso por voz a cada US$ X de gasto estimado no período (padrão `5`; `0` desliga) |
    | `BUDGET_PERIOD` | `day` (padrão, zera à meia-noite) ou `month` |
@@ -51,7 +53,7 @@ zera a conta). Para um teto de verdade, defina o limite de gasto no Console da A
 
 `xiaozhi-claude/` é o xiaozhi **v1.9.4** ([78/xiaozhi-esp32](https://github.com/78/xiaozhi-esp32), commit
 `3ced770`, licença MIT) com a interface do Claude (`main/boards/atoms3-echo-base/claude_display.*`), strings pt-BR,
-só a palavra "Hi, M Five" e o ponto de acesso "Claude-XXXX". As mudanças estão em `main/boards/atoms3-echo-base/`,
+só a palavra "Jarvis" (`wn9_jarvis_tts` do ESP-SR) e o ponto de acesso "Jarvis-XXXX". As mudanças estão em `main/boards/atoms3-echo-base/`,
 `main/boards/common/wifi_board.cc`, `main/idf_component.yml` e `main/assets/locales/pt-PT/language.json`.
 
 A URL do servidor fica gravada no firmware. Crie `~/.claude-atom/cloud.json` (fora do repositório) e compile:
@@ -64,7 +66,7 @@ xiaozhi-claude/build-claude.sh                      # precisa do ESP-IDF 5.x (aj
 cd xiaozhi-claude && source env.sh && idf.py -p /dev/cu.usbmodem* flash   # preserva o Wi-Fi salvo
 ```
 
-Na primeira vez o aparelho abre o ponto de acesso "Claude-XXXX" para você escolher o Wi-Fi.
+Na primeira vez o aparelho abre o ponto de acesso "Jarvis-XXXX" para você escolher o Wi-Fi.
 
 ## Segurança
 
@@ -94,5 +96,5 @@ deixa o servidor sempre ligado e o publica pelo Tailscale Funnel (`server/run-ma
 
 ## Contribuir
 
-Issues e pull requests são bem-vindos. Ideias em aberto: interromper o Claude falando "Hi, M Five" durante a
+Issues e pull requests são bem-vindos. Ideias em aberto: interromper o Jarvis falando "Jarvis" durante a
 resposta, suporte ao AtomS3R (com PSRAM: redução de ruído e cancelamento de eco) e transcrição mais rápida.

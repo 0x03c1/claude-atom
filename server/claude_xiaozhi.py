@@ -85,8 +85,15 @@ FRAME_MS = 60
 VAD_FRAME = IN_RATE * 30 // 1000  # webrtcvad aceita 10/20/30 ms
 PIPER_VOICES = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
 
-VOICE_PROMPT = (
-    "Voce e o Claude conversando por VOZ atraves de um pequeno aparelho (M5Stack AtomS3 com alto-falante). "
+def voice_prompt(cfg: "Config") -> str:
+    who = (f"Seu nome e {cfg.name}: um assistente que conversa por VOZ atraves de um pequeno aparelho "
+           "(M5Stack AtomS3 com alto-falante). Por tras, voce e o Claude, da Anthropic; se perguntarem, pode dizer. ")
+    if cfg.title:
+        who += f'Trate o usuario sempre por "{cfg.title}". '
+    return who + VOICE_RULES
+
+
+VOICE_RULES = (
     "Tudo o que voce escrever sera lido em voz alta e mostrado numa tela minuscula. Responda em texto "
     "corrido, sem markdown, listas, titulos, tabelas, emojis ou blocos de codigo; nunca leia codigo em voz "
     "alta, descreva-o. Seja breve: uma a tres frases, a menos que peçam detalhes. Responda no idioma em que "
@@ -119,6 +126,13 @@ class Config:
     log_text: bool = False  # escrever no log o que foi dito (privacidade)
     budget_usd: float = 5.0  # aviso por voz a cada multiplo deste gasto estimado (0 desliga)
     budget_period: str = "day"  # day | month
+    name: str = "Jarvis"  # como o assistente se chama
+    title: str = "senhor"  # como ele chama o usuario ("" para nenhum)
+
+    @property
+    def vocative(self) -> str:
+        """", senhor" para encaixar nas frases fixas."""
+        return f", {self.title}" if self.title else ""
     allowed: frozenset = frozenset()
 
     @property
@@ -133,8 +147,9 @@ class Config:
 class Transcriber:
     """Whisper local (CPU int8). Carrega em segundo plano para nao atrasar o servidor."""
 
-    def __init__(self, size: str, language: str | None):
+    def __init__(self, size: str, language: str | None, name: str = "Jarvis"):
         self.size = size
+        self.name = name
         self.language = language
         self.model = None
         self.ready = asyncio.Event()
@@ -151,7 +166,7 @@ class Transcriber:
         audio = pcm.astype(np.float32) / 32768.0
         segments, _ = self.model.transcribe(
             audio, language=self.language, beam_size=1, vad_filter=False, condition_on_previous_text=False,
-            initial_prompt="Conversa com o Claude.",  # sem a dica, "Claude" vira "Club", "cloud"
+            initial_prompt=f"Conversa com o {self.name}.",  # sem a dica, nomes viram outras palavras
         )
         return " ".join(s.text.strip() for s in segments).strip()
 
@@ -332,7 +347,7 @@ class ClaudeCodeAgent(Agent):
     async def stream(self, device: str, text: str, device_tools=None):
         claude = shutil.which("claude") or str(Path.home() / ".local/bin/claude")
         args = [claude, "-p", text, "--output-format", "stream-json", "--include-partial-messages",
-                "--verbose", "--append-system-prompt", VOICE_PROMPT, "--allowedTools", self.cfg.tools]
+                "--verbose", "--append-system-prompt", voice_prompt(self.cfg), "--allowedTools", self.cfg.tools]
         if self.cfg.model:
             args += ["--model", self.cfg.model]
         if sid := self.session_for(device):
@@ -376,8 +391,8 @@ class Budget:
     """Soma o custo estimado das respostas no periodo (dia ou mes, horario de Sao Paulo) e avisa a cada
     multiplo do limite. Fica na memoria: um deploy zera a conta."""
 
-    def __init__(self, limit_usd: float, period: str):
-        self.limit, self.period = limit_usd, period
+    def __init__(self, limit_usd: float, period: str, vocative: str = ""):
+        self.limit, self.period, self.vocative = limit_usd, period, vocative
         self.key, self.spent, self.warned = "", 0.0, 0
 
     def add(self, model: str, usage) -> float:
@@ -399,7 +414,7 @@ class Budget:
             return None
         self.warned = int(self.spent // self.limit)
         when = "hoje" if self.period == "day" else "este mês"
-        return (f"Atenção: esta atividade está consumindo muitos tokens. {when.capitalize()} já foram cerca de "
+        return (f"Atenção{self.vocative}: esta atividade está consumindo muitos tokens. {when.capitalize()} já foram cerca de "
                 f"{dollars(self.spent)}, e o limite de aviso é de {dollars(self.limit)}.")
 
 # Ferramentas do aparelho que o Claude pode usar. Lista fechada de proposito: o firmware tambem oferece
@@ -502,7 +517,7 @@ class ApiAgent(Agent):
         }]
         # se o filtro de seguranca recusar, a API refaz a pergunta noutro modelo (o Haiku nao tem fallback)
         self.extra = {} if haiku else {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
-        self.budget = Budget(cfg.budget_usd, cfg.budget_period)
+        self.budget = Budget(cfg.budget_usd, cfg.budget_period, cfg.vocative)
 
     def forget(self, device: str):
         super().forget(device)
@@ -520,7 +535,7 @@ class ApiAgent(Agent):
             # varias voltas: pause_turn da busca na web e chamadas das ferramentas do aparelho
             for _ in range(8):
                 async with self.client.beta.messages.stream(
-                    model=self.model, max_tokens=8000, system=VOICE_PROMPT, messages=messages, tools=tools,
+                    model=self.model, max_tokens=8000, system=voice_prompt(self.cfg), messages=messages, tools=tools,
                     output_config={"effort": self.cfg.effort}, cache_control={"type": "ephemeral"}, **self.extra,
                 ) as stream:
                     async for event in stream:
@@ -529,14 +544,14 @@ class ApiAgent(Agent):
                         elif (event.type == "content_block_start" and event.content_block.type == "server_tool_use"
                               and not searching):
                             searching = True  # avisa uma vez, para nao ficar em silencio durante a busca
-                            yield "\nSó um instante, vou pesquisar.\n"
+                            yield f"\nSó um instante{self.cfg.vocative}, vou pesquisar.\n"
                     final = await stream.get_final_message()
                 cost = self.budget.add(final.model, final.usage)
                 log.info("[%s] custo ~US$ %.4f (%s: US$ %.2f de %.2f)", device, cost, self.budget.key,
                          self.budget.spent, self.budget.limit)
                 if final.stop_reason == "refusal":
                     log.warning("API recusou (%s): %s", final.stop_details, said(self.cfg, text))
-                    yield "\nDesculpe, não posso ajudar com isso."
+                    yield f"\nDesculpe{self.cfg.vocative}, não posso ajudar com isso."
                     return  # a pergunta recusada nao entra no historico
                 if final.stop_reason == "max_tokens":
                     log.warning("resposta cortada em max_tokens")
@@ -556,19 +571,19 @@ class ApiAgent(Agent):
                 messages.append({"role": "user", "content": results})
         except ValueError:  # argumentos de ferramenta em JSON invalido (streaming antecipado)
             log.warning("argumentos invalidos numa chamada de ferramenta")
-            yield "\nDesculpe, me enrolei com o aparelho. Pode repetir?"
+            yield f"\nDesculpe{self.cfg.vocative}, me enrolei com o aparelho. Pode repetir?"
             return
         except self.anthropic.AuthenticationError:
             log.error("ANTHROPIC_API_KEY ausente ou invalida")
-            yield "\nA chave da API da Anthropic não está configurada."
+            yield f"\nDesculpe{self.cfg.vocative}, a chave da API da Anthropic não está configurada."
             return
         except (self.anthropic.RateLimitError, self.anthropic.APIConnectionError) as e:
             log.warning("API indisponivel: %s", e)
-            yield "\nNão consegui falar com o Claude agora. Tente de novo daqui a pouco."
+            yield f"\nNão consegui me conectar agora{self.cfg.vocative}. Tente de novo daqui a pouco."
             return
         except self.anthropic.APIStatusError as e:
             log.warning("API: %s %s", e.status_code, e.message)
-            yield "\nDesculpe, deu um erro na API do Claude."
+            yield f"\nDesculpe{self.cfg.vocative}, deu um erro na API."
             return
         log.info("[%s] tokens: %s entrada (%s do cache), %s saida", device, final.usage.input_tokens,
                  final.usage.cache_read_input_tokens, final.usage.output_tokens)
@@ -583,7 +598,7 @@ class OpenCodeAgent(Agent):
     async def stream(self, device: str, text: str, device_tools=None):
         opencode = shutil.which("opencode") or str(Path.home() / ".opencode/bin/opencode")
         sid = self.session_for(device)
-        message = text if sid else f"[Instrucoes de estilo: {VOICE_PROMPT}]\n\n{text}"
+        message = text if sid else f"[Instrucoes de estilo: {voice_prompt(self.cfg)}]\n\n{text}"
         args = [opencode, "run", "--format", "json"]
         if self.cfg.model:
             args += ["--model", self.cfg.model]
@@ -730,14 +745,14 @@ class Session:
             await self.send(type="llm", emotion="thinking", text="🤔")
             if re.search(r"\b(nova conversa|esquece tudo|reinicia a conversa)\b", text, re.I):
                 srv.agent.forget(self.device)
-                return await self.speak_all(["Certo, começando uma conversa nova."])
+                return await self.speak_all([f"Certo{srv.cfg.vocative}. Começando uma conversa nova."])
             tools = self.tools if self.tools and self.tools.tools else None
             await self.speak_stream(srv.agent.stream(self.device, text, tools))
         except asyncio.CancelledError:
             raise
         except Exception:
             log.exception("erro respondendo")
-            await self.speak_all(["Desculpe, algo deu errado no servidor."])
+            await self.speak_all([f"Desculpe{srv.cfg.vocative}, algo deu errado no servidor."])
 
     async def speak_all(self, sentences: list[str]):
         async def gen():
@@ -809,7 +824,7 @@ class Session:
 class Server:
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        self.asr = Transcriber(cfg.whisper, cfg.language)
+        self.asr = Transcriber(cfg.whisper, cfg.language, cfg.name)
         self.voice = Voice(cfg)
         self.agent: Agent = {"api": ApiAgent, "claude": ClaudeCodeAgent, "opencode": OpenCodeAgent}[cfg.agent](cfg)
         self.ready = asyncio.Event()
@@ -965,6 +980,8 @@ def main():
     p.add_argument("--budget", type=float, default=float(env("BUDGET_USD", "5")),
                    help="agente api: avisa por voz a cada US$ X gastos no periodo (0 desliga)")
     p.add_argument("--budget-period", choices=["day", "month"], default=env("BUDGET_PERIOD", "day"))
+    p.add_argument("--name", default=env("ASSISTANT_NAME", "Jarvis"), help="nome do assistente")
+    p.add_argument("--title", default=env("USER_TITLE", "senhor"), help='como ele chama voce ("" para nenhum)')
     p.add_argument("-v", "--verbose", action="store_true")
     a = p.parse_args()
     if not a.secret and not a.insecure:
@@ -981,6 +998,7 @@ def main():
                  tts=a.tts, voice=voice, rate=a.rate, whisper=a.whisper,
                  language=None if a.language == "auto" else a.language, secret=a.secret,
                  insecure=a.insecure, log_text=a.log_text, budget_usd=a.budget, budget_period=a.budget_period,
+                 name=a.name, title=a.title,
                  allowed=frozenset(m.strip().lower() for m in a.allowed.split(",") if m.strip()))
     Server(cfg).run()
 
