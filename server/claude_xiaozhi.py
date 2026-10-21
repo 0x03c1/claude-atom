@@ -478,11 +478,11 @@ class ApiAgent(Agent):
                         elif (event.type == "content_block_start" and event.content_block.type == "server_tool_use"
                               and not searching):
                             searching = True  # avisa uma vez, para nao ficar em silencio durante a busca
-                            yield "\nSo um instante, vou pesquisar.\n"
+                            yield "\nSó um instante, vou pesquisar.\n"
                     final = await stream.get_final_message()
                 if final.stop_reason == "refusal":
                     log.warning("API recusou (%s): %s", final.stop_details, said(self.cfg, text))
-                    yield "\nDesculpe, nao posso ajudar com isso."
+                    yield "\nDesculpe, não posso ajudar com isso."
                     return  # a pergunta recusada nao entra no historico
                 if final.stop_reason == "max_tokens":
                     log.warning("resposta cortada em max_tokens")
@@ -506,11 +506,11 @@ class ApiAgent(Agent):
             return
         except self.anthropic.AuthenticationError:
             log.error("ANTHROPIC_API_KEY ausente ou invalida")
-            yield "\nA chave da API da Anthropic nao esta configurada."
+            yield "\nA chave da API da Anthropic não está configurada."
             return
         except (self.anthropic.RateLimitError, self.anthropic.APIConnectionError) as e:
             log.warning("API indisponivel: %s", e)
-            yield "\nNao consegui falar com o Claude agora. Tente de novo daqui a pouco."
+            yield "\nNão consegui falar com o Claude agora. Tente de novo daqui a pouco."
             return
         except self.anthropic.APIStatusError as e:
             log.warning("API: %s %s", e.status_code, e.message)
