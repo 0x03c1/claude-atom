@@ -117,6 +117,8 @@ class Config:
     secret: str = ""
     insecure: bool = False  # sem segredo: so para a rede local
     log_text: bool = False  # escrever no log o que foi dito (privacidade)
+    budget_usd: float = 5.0  # aviso por voz a cada multiplo deste gasto estimado (0 desliga)
+    budget_period: str = "day"  # day | month
     allowed: frozenset = frozenset()
 
     @property
@@ -352,6 +354,54 @@ class ClaudeCodeAgent(Agent):
 
 API_MODELS = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5", "haiku": "claude-haiku-5-5"}
 
+# US$ por milhao de tokens: entrada, saida, leitura de cache; a escrita de cache (5 min) custa 1,25x a entrada.
+# Estimativa para o aviso de gasto: o valor exato esta no Console da Anthropic.
+PRICES = {"claude-opus-5-5": (4.0, 20.0, 0.20), "claude-sonnet-5-5": (2.0, 10.0, 0.20),
+          "claude-haiku-5-5": (0.10, 0.50, 0.01)}
+WEB_SEARCH_USD = 10.0 / 1000
+
+
+def dollars(value: float) -> str:
+    """Valor por extenso para a voz: "5 dólares e 12 centavos" (ela le mal "5.12")."""
+    whole, cents = int(value), round((value - int(value)) * 100)
+    if cents == 100:
+        whole, cents = whole + 1, 0
+    if not whole:
+        return f"{cents} centavos"
+    text = f"{whole} dólar" + ("" if whole == 1 else "es")
+    return text + (f" e {cents} centavos" if cents else "")
+
+
+class Budget:
+    """Soma o custo estimado das respostas no periodo (dia ou mes, horario de Sao Paulo) e avisa a cada
+    multiplo do limite. Fica na memoria: um deploy zera a conta."""
+
+    def __init__(self, limit_usd: float, period: str):
+        self.limit, self.period = limit_usd, period
+        self.key, self.spent, self.warned = "", 0.0, 0
+
+    def add(self, model: str, usage) -> float:
+        key = time.strftime("%Y-%m-%d" if self.period == "day" else "%Y-%m")
+        if key != self.key:
+            self.key, self.spent, self.warned = key, 0.0, 0
+        price_in, price_out, price_read = PRICES.get(model, PRICES["claude-opus-5-5"])  # desconhecido: o mais caro
+        tool_use = getattr(usage, "server_tool_use", None)
+        cost = ((usage.input_tokens or 0) * price_in + (usage.output_tokens or 0) * price_out
+                + (getattr(usage, "cache_read_input_tokens", 0) or 0) * price_read
+                + (getattr(usage, "cache_creation_input_tokens", 0) or 0) * price_in * 1.25) / 1e6
+        cost += (getattr(tool_use, "web_search_requests", 0) or 0) * WEB_SEARCH_USD
+        self.spent += cost
+        return cost
+
+    def warning(self) -> str | None:
+        """Frase de aviso quando o gasto passa de mais um multiplo do limite; senao None."""
+        if self.limit <= 0 or self.spent < (self.warned + 1) * self.limit:
+            return None
+        self.warned = int(self.spent // self.limit)
+        when = "hoje" if self.period == "day" else "este mês"
+        return (f"Atenção: esta atividade está consumindo muitos tokens. {when.capitalize()} já foram cerca de "
+                f"{dollars(self.spent)}, e o limite de aviso é de {dollars(self.limit)}.")
+
 # Ferramentas do aparelho que o Claude pode usar. Lista fechada de proposito: o firmware tambem oferece
 # coisas como gravar firmware de uma URL, e um texto da busca na web nao pode chegar ate elas.
 DEVICE_TOOLS = ("self.get_device_status", "self.audio_speaker.set_volume", "self.screen.set_brightness",
@@ -452,6 +502,7 @@ class ApiAgent(Agent):
         }]
         # se o filtro de seguranca recusar, a API refaz a pergunta noutro modelo (o Haiku nao tem fallback)
         self.extra = {} if haiku else {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
+        self.budget = Budget(cfg.budget_usd, cfg.budget_period)
 
     def forget(self, device: str):
         super().forget(device)
@@ -480,6 +531,9 @@ class ApiAgent(Agent):
                             searching = True  # avisa uma vez, para nao ficar em silencio durante a busca
                             yield "\nSó um instante, vou pesquisar.\n"
                     final = await stream.get_final_message()
+                cost = self.budget.add(final.model, final.usage)
+                log.info("[%s] custo ~US$ %.4f (%s: US$ %.2f de %.2f)", device, cost, self.budget.key,
+                         self.budget.spent, self.budget.limit)
                 if final.stop_reason == "refusal":
                     log.warning("API recusou (%s): %s", final.stop_details, said(self.cfg, text))
                     yield "\nDesculpe, não posso ajudar com isso."
@@ -520,6 +574,9 @@ class ApiAgent(Agent):
                  final.usage.cache_read_input_tokens, final.usage.output_tokens)
         self.histories[device] = messages
         self.remember(device, "api")
+        if warning := self.budget.warning():
+            log.warning("[%s] gasto passou do limite: US$ %.2f", device, self.budget.spent)
+            yield "\n" + warning
 
 
 class OpenCodeAgent(Agent):
@@ -905,6 +962,9 @@ def main():
                    help="aceita rodar sem segredo (OTA aberto em /xiaozhi/ota/): so na rede local")
     p.add_argument("--log-text", action="store_true", default=env("LOG_TEXT") == "1",
                    help="escreve no log o que voce e o Claude disseram (padrao: so o tamanho)")
+    p.add_argument("--budget", type=float, default=float(env("BUDGET_USD", "5")),
+                   help="agente api: avisa por voz a cada US$ X gastos no periodo (0 desliga)")
+    p.add_argument("--budget-period", choices=["day", "month"], default=env("BUDGET_PERIOD", "day"))
     p.add_argument("-v", "--verbose", action="store_true")
     a = p.parse_args()
     if not a.secret and not a.insecure:
@@ -920,7 +980,7 @@ def main():
                  public_url=a.public_url, tools=a.tools,
                  tts=a.tts, voice=voice, rate=a.rate, whisper=a.whisper,
                  language=None if a.language == "auto" else a.language, secret=a.secret,
-                 insecure=a.insecure, log_text=a.log_text,
+                 insecure=a.insecure, log_text=a.log_text, budget_usd=a.budget, budget_period=a.budget_period,
                  allowed=frozenset(m.strip().lower() for m in a.allowed.split(",") if m.strip()))
     Server(cfg).run()
 

@@ -39,8 +39,13 @@ mais clara".
    | `AGENT_EFFORT` | `low` (padrão), `medium` ou `high` |
    | `WHISPER_MODEL` | `small` (padrão, mais preciso) ou `base` (~3x mais rápido) |
    | `LOG_TEXT` | `1` para escrever no log o que foi dito (padrão: só o tamanho) |
+   | `BUDGET_USD` | aviso por voz a cada US$ X de gasto estimado no período (padrão `5`; `0` desliga) |
+   | `BUDGET_PERIOD` | `day` (padrão, zera à meia-noite) ou `month` |
 
 Cada push na `main` que mexa no servidor gera um deploy novo sem derrubar o que está no ar.
+
+O aviso de gasto é uma estimativa feita a partir do uso de tokens de cada resposta e fica na memória (um deploy
+zera a conta). Para um teto de verdade, defina o limite de gasto no Console da Anthropic.
 
 ## Firmware
 
