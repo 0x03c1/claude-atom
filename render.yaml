@@ -1,0 +1,26 @@
+# Blueprint do Render: servidor do Claude Atom (Whisper + API da Anthropic + Piper).
+# Cada push na main que mexa em server/ gera um deploy novo, sem derrubar o que esta no ar.
+services:
+  - type: web
+    name: claude-atom
+    runtime: docker
+    dockerfilePath: ./server/Dockerfile
+    dockerContext: ./server
+    buildFilter:
+      paths:
+        - server/**
+    plan: 1c-2g          # 1 CPU / 2 GB: o Whisper small ocupa ~420 MB parado e mais ao transcrever
+    region: virginia     # a mais perto do Brasil (nao ha regiao na America do Sul)
+    healthCheckPath: /   # 503 ate os modelos carregarem
+    autoDeployTrigger: commit
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false      # o Render pede na criacao
+      - key: CLAUDE_ATOM_SECRET
+        sync: false      # o "secret" de ~/.claude-atom/cloud.json (vai na URL de OTA do firmware)
+      - key: ALLOWED_DEVICES
+        sync: false      # o "device" de ~/.claude-atom/cloud.json (MAC do AtomS3)
+      - key: AGENT_MODEL
+        value: opus      # opus | sonnet | haiku
+      - key: AGENT_EFFORT
+        value: low

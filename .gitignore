@@ -1,0 +1,20 @@
+# Dumps da flash: contem o Wi-Fi salvo (SSID e senha) na NVS
+backup/
+
+# Configuracao gerada do firmware: contem o segredo da URL de OTA
+xiaozhi-claude/sdkconfig
+xiaozhi-claude/sdkconfig.old
+xiaozhi-claude/build/
+xiaozhi-claude/managed_components/
+
+# Firmware Arduino antigo
+firmware/.pio/
+
+# Locais
+.claude/settings.local.json
+__pycache__/
+*.pyc
+.DS_Store
+
+# Indice do editor (clangd)
+firmware/.cache/
