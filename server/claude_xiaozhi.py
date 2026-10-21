@@ -138,8 +138,9 @@ class Transcriber:
     def load(self):
         from faster_whisper import WhisperModel
 
-        log.info("carregando Whisper '%s' (a primeira vez baixa o modelo)...", self.size)
-        self.model = WhisperModel(self.size, device="cpu", compute_type="int8")
+        threads = cpu_limit()
+        log.info("carregando Whisper '%s' com %d thread(s) (a primeira vez baixa o modelo)...", self.size, threads)
+        self.model = WhisperModel(self.size, device="cpu", compute_type="int8", cpu_threads=threads)
         log.info("Whisper pronto")
 
     def transcribe(self, pcm: np.ndarray) -> str:
@@ -149,6 +150,23 @@ class Transcriber:
             initial_prompt="Conversa com o Claude.",  # sem a dica, "Claude" vira "Club", "cloud"
         )
         return " ".join(s.text.strip() for s in segments).strip()
+
+
+def cpu_limit() -> int:
+    """CPUs que o processo pode usar de fato. Num container (Render) os.cpu_count() mostra a maquina
+    inteira; com mais threads do que a cota, o Whisper fica muito mais lento."""
+    if threads := os.environ.get("ASR_THREADS"):
+        return max(1, int(threads))
+    try:
+        quota, period = Path("/sys/fs/cgroup/cpu.max").read_text().split()  # cgroup v2
+        if quota != "max":
+            return max(1, round(int(quota) / int(period)))
+    except (OSError, ValueError):
+        pass
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except AttributeError:  # macOS
+        return min(4, os.cpu_count() or 1)
 
 
 def resample(pcm: np.ndarray, src: int, dst: int) -> np.ndarray:
