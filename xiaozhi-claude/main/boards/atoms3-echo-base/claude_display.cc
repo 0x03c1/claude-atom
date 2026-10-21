@@ -102,7 +102,7 @@ void ClaudeDisplay::BuildUi() {
     lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
 
     hint_label_ = MakeLabel(screen, fonts_.text_font, COL_FAINT);
-    lv_label_set_text(hint_label_, "Diga \"Oi, Jarvis\"");
+    lv_label_set_text(hint_label_, "Aperte e fale");
     lv_obj_set_width(hint_label_, width_);
     lv_obj_set_style_text_align(hint_label_, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_pos(hint_label_, 0, 102);

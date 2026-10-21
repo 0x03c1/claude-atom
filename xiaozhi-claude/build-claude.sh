@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compila o xiaozhi para AtomS3 + Atomic Echo Base com a interface do Jarvis (palavra "Jarvis") e o servidor.
+# Compila o xiaozhi para AtomS3 + Atomic Echo Base com a interface do Jarvis e o servidor.
 # A URL de OTA vem de ~/.claude-atom/cloud.json (fora do repositorio; public_url e gravado por
 # server/install-mac.sh):  {"public_url": "https://<mac>.<tailnet>.ts.net", "secret": "<hex>", "device": "<mac>"}
 set -euo pipefail
@@ -23,9 +23,9 @@ CONFIG_SR_WN_WN9_JARVIS_TTS=y
 # CONFIG_SR_WN_WN9_NIHAOXIAOZHI_TTS is not set
 CONF
 fi
-# palavra de ativacao: so "Jarvis" (reaplicada sempre, para sdkconfig ja existente)
-sed -i '' -E '/^(# )?CONFIG_SR_WN_WN9_(HIMFIVE|JARVIS_TTS)[ =]/d' sdkconfig
-printf '%s\n' '# CONFIG_SR_WN_WN9_HIMFIVE is not set' 'CONFIG_SR_WN_WN9_JARVIS_TTS=y' >> sdkconfig
+# sem palavra de ativacao: no ESP32-S3 sem PSRAM (AtomS3) o detector do ESP-SR nao roda
+# (o AFE exige PSRAM e o WakeNet sem AFE trava ao carregar o modelo); conversa pelo botao
+sed -i '' -E '/^(# )?CONFIG_USE_ESP_WAKE_WORD[ =]/d' sdkconfig
 # a URL e sempre reaplicada (o segredo pode mudar)
 sed -i '' '/^CONFIG_OTA_URL=/d' sdkconfig
 echo "CONFIG_OTA_URL=\"$OTA_URL\"" >> sdkconfig
